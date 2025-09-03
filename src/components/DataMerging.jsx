@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { Card } from './ui/Card'
 import { Button } from './ui/Button'
 import { Input } from './ui/Input'
@@ -10,15 +10,53 @@ import {
   Download,
   CheckCircle,
   AlertTriangle,
-  X
+  X,
+  RefreshCw,
+  Info,
+  Settings,
+  ChevronDown,
+  ChevronUp,
+  Save
 } from 'lucide-react'
+import { 
+  mergeDatasets, 
+  getCommonFields, 
+  getAllFields,
+  getMergeStats,
+  JOIN_TYPES,
+  CONFLICT_STRATEGIES
+} from '../services/dataMergingService'
 
 export function DataMerging({ state, dispatch }) {
   const [selectedDatasets, setSelectedDatasets] = useState([])
   const [mergeKey, setMergeKey] = useState('')
+  const [joinType, setJoinType] = useState('inner')
+  const [conflictStrategy, setConflictStrategy] = useState('first')
   const [newDatasetName, setNewDatasetName] = useState('')
   const [previewData, setPreviewData] = useState(null)
+  const [mergeSchema, setMergeSchema] = useState({})
+  const [mergeStats, setMergeStats] = useState(null)
   const [isProcessing, setIsProcessing] = useState(false)
+  const [showAdvancedOptions, setShowAdvancedOptions] = useState(false)
+  const [error, setError] = useState(null)
+
+  // Reset state when datasets change
+  useEffect(() => {
+    setPreviewData(null)
+    setMergeSchema({})
+    setMergeStats(null)
+    setError(null)
+  }, [selectedDatasets, mergeKey, joinType, conflictStrategy])
+
+  // Update new dataset name when selected datasets change
+  useEffect(() => {
+    if (selectedDatasets.length >= 2) {
+      const baseName = selectedDatasets.map(d => d.name.split(' ')[0]).join('_');
+      setNewDatasetName(`${baseName}_merged`);
+    } else {
+      setNewDatasetName('');
+    }
+  }, [selectedDatasets]);
 
   const handleSelectDataset = (dataset) => {
     if (selectedDatasets.find(d => d.datasetId === dataset.datasetId)) {
@@ -27,61 +65,105 @@ export function DataMerging({ state, dispatch }) {
       setSelectedDatasets(prev => [...prev, dataset])
     }
     setPreviewData(null)
+    setMergeSchema({})
+    setMergeStats(null)
   }
 
   const handlePreviewMerge = () => {
-    if (selectedDatasets.length < 2 || !mergeKey) return
+    if (selectedDatasets.length < 2 || !mergeKey) {
+      setError('Please select at least 2 datasets and a merge key');
+      return;
+    }
 
     setIsProcessing(true)
+    setError(null)
     
-    // Simulate merge processing
+    // Use setTimeout to avoid blocking the UI
     setTimeout(() => {
-      const merged = performMerge(selectedDatasets, mergeKey)
-      setPreviewData(merged)
-      setIsProcessing(false)
-    }, 1000)
+      try {
+        // Perform the merge
+        const mergeResult = mergeDatasets(selectedDatasets, {
+          mergeKey,
+          joinType,
+          conflictStrategy,
+          includeSourceInfo: true
+        });
+        
+        setPreviewData(mergeResult.data);
+        setMergeSchema(mergeResult.schema);
+        setMergeStats(mergeResult.stats);
+      } catch (err) {
+        console.error('Error during data merging:', err);
+        setError(err.message || 'An error occurred during merging');
+      } finally {
+        setIsProcessing(false);
+      }
+    }, 500);
   }
 
   const handleExecuteMerge = () => {
-    if (!previewData || !newDatasetName) return
+    if (!previewData || !newDatasetName) {
+      setError('Please provide a name for the merged dataset');
+      return;
+    }
 
     dispatch({
       type: 'MERGE_DATASETS',
       payload: {
         sourceDatasets: selectedDatasets,
         mergeKey,
-        newName: newDatasetName
+        newName: newDatasetName,
+        schema: mergeSchema
       }
     })
 
-    alert('Datasets merged successfully!')
-    setSelectedDatasets([])
-    setMergeKey('')
-    setNewDatasetName('')
-    setPreviewData(null)
+    // Show success message
+    alert('Datasets merged successfully!');
+    
+    // Reset state
+    setSelectedDatasets([]);
+    setMergeKey('');
+    setNewDatasetName('');
+    setPreviewData(null);
+    setMergeSchema({});
+    setMergeStats(null);
   }
 
-  const performMerge = (datasets, key) => {
-    // Simple merge: combine all records
-    const merged = []
-    datasets.forEach(dataset => {
-      const data = dataset.cleanedData || dataset.rawData || []
-      merged.push(...data)
-    })
-    return merged
+  const handleExportData = () => {
+    if (!previewData) return;
+    
+    // Create CSV content
+    const headers = Object.keys(previewData[0] || {})
+      .filter(key => !key.startsWith('_'))
+      .join(',');
+      
+    const rows = previewData.map(row => 
+      Object.entries(row)
+        .filter(([key]) => !key.startsWith('_'))
+        .map(([_, value]) => 
+          typeof value === 'string' ? `"${value.replace(/"/g, '""')}"` : value
+        )
+        .join(',')
+    );
+    
+    const csvContent = [headers, ...rows].join('\n');
+    
+    // Create download link
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `${newDatasetName || 'merged_data'}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   }
 
-  const getCommonFields = () => {
-    if (selectedDatasets.length === 0) return []
-    
-    const allFields = selectedDatasets.map(dataset => 
-      Object.keys(dataset.schema || {})
-    )
-    
-    return allFields.reduce((common, fields) => 
-      common.filter(field => fields.includes(field))
-    )
-  }
+  // Get common fields across selected datasets
+  const commonFields = getCommonFields(selectedDatasets);
+  
+  // Get all fields across selected datasets
+  const allFields = getAllFields(selectedDatasets);
 
   return (
     <div className="p-6 space-y-6">
@@ -99,30 +181,36 @@ export function DataMerging({ state, dispatch }) {
             Select Datasets to Merge
           </h3>
           
-          <div className="space-y-3 mb-6">
-            {state.datasets.map((dataset) => (
-              <div
-                key={dataset.datasetId}
-                className={`p-3 rounded-lg border cursor-pointer transition-all ${
-                  selectedDatasets.find(d => d.datasetId === dataset.datasetId)
-                    ? 'border-primary bg-blue-50'
-                    : 'border-gray-200 hover:border-gray-300'
-                }`}
-                onClick={() => handleSelectDataset(dataset)}
-              >
-                <div className="flex items-center justify-between">
-                  <div>
-                    <div className="font-medium text-text-primary">{dataset.name}</div>
-                    <div className="text-sm text-text-secondary">
-                      {dataset.rowCount || 0} rows • {Object.keys(dataset.schema || {}).length} fields
-                    </div>
-                  </div>
-                  {selectedDatasets.find(d => d.datasetId === dataset.datasetId) && (
-                    <CheckCircle className="w-5 h-5 text-primary" />
-                  )}
-                </div>
+          <div className="space-y-3 mb-6 max-h-[300px] overflow-y-auto">
+            {state.datasets.length === 0 ? (
+              <div className="text-text-secondary text-center py-4">
+                No datasets available. Create a dataset first.
               </div>
-            ))}
+            ) : (
+              state.datasets.map((dataset) => (
+                <div
+                  key={dataset.datasetId}
+                  className={`p-3 rounded-lg border cursor-pointer transition-all ${
+                    selectedDatasets.find(d => d.datasetId === dataset.datasetId)
+                      ? 'border-primary bg-blue-50'
+                      : 'border-gray-200 hover:border-gray-300'
+                  }`}
+                  onClick={() => handleSelectDataset(dataset)}
+                >
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="font-medium text-text-primary">{dataset.name}</div>
+                      <div className="text-sm text-text-secondary">
+                        {dataset.rowCount || 0} rows • {Object.keys(dataset.schema || {}).length} fields
+                      </div>
+                    </div>
+                    {selectedDatasets.find(d => d.datasetId === dataset.datasetId) && (
+                      <CheckCircle className="w-5 h-5 text-primary" />
+                    )}
+                  </div>
+                </div>
+              ))
+            )}
           </div>
 
           <div className="text-sm text-text-secondary">
@@ -148,10 +236,15 @@ export function DataMerging({ state, dispatch }) {
                   className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
                 >
                   <option value="">Select merge key...</option>
-                  {getCommonFields().map(field => (
+                  {commonFields.map(field => (
                     <option key={field} value={field}>{field}</option>
                   ))}
                 </select>
+                {commonFields.length === 0 && (
+                  <p className="text-sm text-red-500 mt-1">
+                    No common fields found across selected datasets
+                  </p>
+                )}
               </div>
 
               <Input
@@ -161,15 +254,83 @@ export function DataMerging({ state, dispatch }) {
                 placeholder="Enter name for merged dataset"
               />
 
+              <div>
+                <button
+                  onClick={() => setShowAdvancedOptions(!showAdvancedOptions)}
+                  className="flex items-center gap-2 text-sm text-text-secondary hover:text-primary"
+                >
+                  {showAdvancedOptions ? (
+                    <ChevronUp className="w-4 h-4" />
+                  ) : (
+                    <ChevronDown className="w-4 h-4" />
+                  )}
+                  Advanced Options
+                </button>
+                
+                {showAdvancedOptions && (
+                  <div className="mt-3 space-y-3 p-3 bg-gray-50 rounded-md">
+                    <div>
+                      <label className="block text-sm font-medium text-text-primary mb-2">
+                        Join Type
+                      </label>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {JOIN_TYPES.map(type => (
+                          <button
+                            key={type.id}
+                            onClick={() => setJoinType(type.id)}
+                            className={`p-2 border rounded-md text-left text-sm ${
+                              joinType === type.id
+                                ? 'border-primary bg-blue-50'
+                                : 'border-gray-200 hover:border-gray-300'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className="text-lg">{type.icon}</span>
+                              <div>
+                                <div className="font-medium">{type.name}</div>
+                                <div className="text-xs text-text-secondary">{type.description}</div>
+                              </div>
+                            </div>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    
+                    <div>
+                      <label className="block text-sm font-medium text-text-primary mb-2">
+                        Conflict Resolution
+                      </label>
+                      <select
+                        value={conflictStrategy}
+                        onChange={(e) => setConflictStrategy(e.target.value)}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary"
+                      >
+                        {CONFLICT_STRATEGIES.map(strategy => (
+                          <option key={strategy.id} value={strategy.id}>
+                            {strategy.name} - {strategy.description}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {error && (
+                <div className="text-sm text-red-500 p-2 bg-red-50 rounded-md">
+                  {error}
+                </div>
+              )}
+
               <Button 
                 variant="primary" 
                 onClick={handlePreviewMerge}
-                disabled={!mergeKey || isProcessing}
+                disabled={!mergeKey || isProcessing || commonFields.length === 0}
                 className="w-full"
               >
                 {isProcessing ? (
                   <>
-                    <div className="w-4 h-4 mr-2 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
                     Processing...
                   </>
                 ) : (
@@ -212,7 +373,12 @@ export function DataMerging({ state, dispatch }) {
                   </button>
                 </div>
                 {index < selectedDatasets.length - 1 && (
-                  <ArrowRight className="w-5 h-5 text-text-secondary" />
+                  <div className="flex flex-col items-center">
+                    <div className="text-xs text-text-secondary mb-1">
+                      {JOIN_TYPES.find(t => t.id === joinType)?.name || 'Join'}
+                    </div>
+                    <ArrowRight className="w-5 h-5 text-text-secondary" />
+                  </div>
                 )}
               </React.Fragment>
             ))}
@@ -222,12 +388,31 @@ export function DataMerging({ state, dispatch }) {
                 <ArrowRight className="w-5 h-5 text-text-secondary" />
                 <div className="px-3 py-2 bg-accent/10 border border-accent rounded-lg">
                   <span className="text-sm font-medium text-accent">
-                    Merged Dataset
+                    {newDatasetName || 'Merged Dataset'}
                   </span>
+                  {mergeStats && (
+                    <span className="text-xs text-text-secondary ml-2">
+                      ({mergeStats.rowCount} rows)
+                    </span>
+                  )}
                 </div>
               </>
             )}
           </div>
+          
+          {mergeKey && (
+            <div className="mt-4 text-sm text-text-secondary">
+              <span className="font-medium">Merge Key:</span> {mergeKey}
+              {joinType !== 'union' && (
+                <span className="ml-4">
+                  <span className="font-medium">Join Type:</span> {JOIN_TYPES.find(t => t.id === joinType)?.name}
+                </span>
+              )}
+              <span className="ml-4">
+                <span className="font-medium">Conflict Strategy:</span> {CONFLICT_STRATEGIES.find(s => s.id === conflictStrategy)?.name}
+              </span>
+            </div>
+          )}
         </Card>
       )}
 
@@ -242,7 +427,10 @@ export function DataMerging({ state, dispatch }) {
               </p>
             </div>
             <div className="flex gap-2">
-              <Button variant="outline">
+              <Button 
+                variant="outline"
+                onClick={handleExportData}
+              >
                 <Download className="w-4 h-4 mr-2" />
                 Export Preview
               </Button>
@@ -251,15 +439,41 @@ export function DataMerging({ state, dispatch }) {
                 onClick={handleExecuteMerge}
                 disabled={!newDatasetName}
               >
-                <CheckCircle className="w-4 h-4 mr-2" />
-                Execute Merge
+                <Save className="w-4 h-4 mr-2" />
+                Save Merged Dataset
               </Button>
             </div>
           </div>
           
+          {mergeStats && (
+            <div className="mb-4 p-3 bg-blue-50 rounded-md grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div>
+                <div className="text-xs text-text-secondary">Source Datasets</div>
+                <div className="text-lg font-semibold">{mergeStats.sourceDatasets}</div>
+              </div>
+              <div>
+                <div className="text-xs text-text-secondary">Total Source Rows</div>
+                <div className="text-lg font-semibold">{selectedDatasets.reduce((sum, d) => sum + (d.rowCount || 0), 0)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-text-secondary">Merged Rows</div>
+                <div className="text-lg font-semibold">{previewData.length}</div>
+              </div>
+            </div>
+          )}
+          
           <DataTable 
-            data={previewData}
-            schema={{}}
+            data={previewData.map(row => {
+              // Filter out internal fields starting with _
+              const filteredRow = {};
+              Object.entries(row).forEach(([key, value]) => {
+                if (!key.startsWith('_')) {
+                  filteredRow[key] = value;
+                }
+              });
+              return filteredRow;
+            })}
+            schema={mergeSchema}
             maxRows={10}
           />
         </Card>
@@ -267,3 +481,4 @@ export function DataMerging({ state, dispatch }) {
     </div>
   )
 }
+
